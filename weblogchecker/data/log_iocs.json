@@ -1,0 +1,42 @@
+{
+ "provenance": "Webshell filename IOCs are the canonical names documented publicly for the c99 / r57 / FilesMan / b374k / WSO shell families (the same list concept as phpscan's iocs.json, sourced from the public write-ups for those families and the PHP Malware Finder project, github.com/jvoisin/php-malware-finder). Scanner user-agent fingerprints are the self-identifying strings those tools send by default. The eval-stdin.php path is the UnitTest shell documented in PHPatch's October 2026 php2shell (CVE-2026-109618 / CVE-2026-109619) coverage in the phpatch threat swarm. No indicator in this file is an exploit payload; every entry is a name, path or string that appears in ordinary access logs.",
+ "scanner_user_agents": [
+  "sqlmap",
+  "nuclei",
+  "nikto",
+  "nmap scripting engine",
+  "masscan",
+  "zgrab",
+  "acunetix",
+  "nessus",
+  "gobuster",
+  "dirbuster",
+  "hydra",
+  "wpscan",
+  "zmeu"
+ ],
+ "shell_names_canonical": [
+  "c99.php",
+  "c99shell.php",
+  "r57.php",
+  "r57shell.php",
+  "b374k.php",
+  "wso.php",
+  "filesman.php"
+ ],
+ "shell_names_dropper": [
+  "x.php",
+  "1.php"
+ ],
+ "shell_names_generic": [
+  "shell.php",
+  "cmd.php",
+  "backdoor.php",
+  "hack.php"
+ ],
+ "unit_test_shell_paths": [
+  "eval-stdin.php"
+ ],
+ "updated": "2026-10-30",
+ "version": 1
+}
