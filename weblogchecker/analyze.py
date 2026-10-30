@@ -9,7 +9,7 @@ verdicts of compromise.
 
 import gzip
 import re
-from collections import deque
+from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote, unquote_plus
 
@@ -49,6 +49,11 @@ BRUTE_WINDOW = timedelta(seconds=600)
 BRUTE_MIN_POSTS = 20
 BRUTE_MIN_FAILURES = 10
 BRUTE_SUCCESS_MIN_PRIOR_FAILURES = 5
+
+# Baseline-diff (first-seen executable) scoring. "Few source IPs"
+# is one of the stacked weak signals; the severity table built on
+# the signal count lives in Analyzer._first_seen_findings.
+FEW_IPS_MAX = 2
 
 
 def parse_timestamp(text):
@@ -98,6 +103,7 @@ def parse_line(raw_line):
         "path": path,
         "query": query,
         "status": int(status_text) if status_text.isdigit() else None,
+        "referer": match.group("ref") or "",
         "ua": match.group("ua") or "",
         "line": line,
     }
@@ -122,6 +128,44 @@ def _truncate(line):
 
 def _success(status):
     return status is not None and 200 <= status < 400
+
+
+def executable_path_key(entry):
+    """Normalized identity of an executable path in an entry.
+
+    Uses the same normalization the detectors use (URL-decoded,
+    lower-cased; the parser has already split the query string
+    off), so a file is the same file in the baseline and in the
+    analyzed log regardless of casing or encoding. Returns None
+    for non-executable paths.
+    """
+    path = _decode(entry["path"]).lower()
+    if path.endswith(ind.EXECUTABLE_EXTS):
+        return path
+    return None
+
+
+def collect_baseline(stream):
+    """Stream a trusted baseline log and collect its executable paths.
+
+    Returns (paths, stats): the set of normalized executable paths
+    the baseline contains, and line accounting in the same shape
+    as the analyzer's stats.
+    """
+    paths = set()
+    stats = {"lines_read": 0, "entries_parsed": 0, "lines_skipped": 0}
+    for raw in stream:
+        stats["lines_read"] += 1
+        entry = parse_line(raw)
+        if entry is None:
+            if raw.strip():
+                stats["lines_skipped"] += 1
+            continue
+        stats["entries_parsed"] += 1
+        key = executable_path_key(entry)
+        if key is not None:
+            paths.add(key)
+    return paths, stats
 
 
 class _BruteTracker:
@@ -210,8 +254,16 @@ class _BruteTracker:
 
 
 class Analyzer:
-    def __init__(self, since=None):
+    def __init__(self, since=None, baseline_paths=None,
+                 baseline_name=None):
         self.since = since  # a datetime.date or None
+        # Normalized executable paths seen in a trusted baseline
+        # log, or None when no baseline was supplied - first-seen
+        # tracking is then off entirely and analysis behaves
+        # exactly as it did before the baseline feature existed.
+        self.baseline_paths = baseline_paths
+        self.baseline_name = baseline_name
+        self._first_seen = {}
         self.stats = {
             "lines_read": 0,
             "entries_parsed": 0,
@@ -346,6 +398,110 @@ class Analyzer:
         if method == "POST" and basename in ind.LOGIN_BASENAMES:
             self._brute.feed(entry)
 
+    # -- baseline diff ------------------------------------------------
+    def _track_first_seen(self, entry):
+        """Aggregate requests to executables absent from the baseline.
+
+        Only runs when a baseline was supplied. An executable that
+        appears in the baseline is never tracked, so it can never
+        be reported as first-seen.
+        """
+        if self.baseline_paths is None:
+            return
+        key = executable_path_key(entry)
+        if key is None or key in self.baseline_paths:
+            return
+        agg = self._first_seen.get(key)
+        if agg is None:
+            agg = {
+                "count": 0, "first_seen": entry["ts"],
+                "last_seen": entry["ts"], "success": 0, "posts": 0,
+                "no_referrer": 0, "ips": Counter(),
+                "first_referer": entry["referer"],
+                "evidence": [],
+            }
+            self._first_seen[key] = agg
+        agg["count"] += 1
+        if entry["ts"] < agg["first_seen"]:
+            agg["first_seen"] = entry["ts"]
+            agg["first_referer"] = entry["referer"]
+        if entry["ts"] > agg["last_seen"]:
+            agg["last_seen"] = entry["ts"]
+        if _success(entry["status"]):
+            agg["success"] += 1
+        if entry["method"] in ("POST", "PUT"):
+            agg["posts"] += 1
+        if entry["referer"] in ("", "-"):
+            agg["no_referrer"] += 1
+        agg["ips"][entry["ip"]] += 1
+        if len(agg["evidence"]) < MAX_EVIDENCE_PER_FINDING:
+            agg["evidence"].append(_truncate(entry["line"]))
+
+    def _first_seen_findings(self):
+        """Score first-seen executables on stacked weak signals.
+
+        Severity discipline (the honesty contract): first-seen on
+        its own is a LOW note. Climbing to medium takes three
+        stacked signals, to high takes four or more - and a path
+        whose first hit arrived from a wp-admin page is treated
+        as admin-introduced (plugin install, core update): capped
+        at low, and dropped entirely when its signal stack is
+        thin, because ordinary admin work must not read as an
+        incident. Confidence never exceeds medium: the signals
+        are circumstantial by construction.
+        """
+        out = []
+        for path in sorted(self._first_seen):
+            agg = self._first_seen[path]
+            signals = {
+                "success_response": agg["success"] > 0,
+                "post_method": agg["posts"] > 0,
+                "no_referrer": agg["no_referrer"] * 2 >= agg["count"],
+                "few_source_ips": len(agg["ips"]) <= FEW_IPS_MAX,
+                "upload_directory": any(
+                    marker in path for marker in ind.UPLOAD_DIR_MARKERS),
+            }
+            stacked = sum(1 for fired in signals.values() if fired)
+            admin_introduced = "/wp-admin/" in agg["first_referer"]
+            if admin_introduced and stacked <= 2:
+                continue
+            if stacked <= 2:
+                severity, confidence = "low", "low"
+            elif stacked == 3:
+                severity, confidence = "medium", "medium"
+            else:
+                severity, confidence = "high", "medium"
+            notes = []
+            if admin_introduced:
+                severity = "low"
+                notes.append(
+                    "its first hit arrived from a wp-admin page, so "
+                    "it looks admin-introduced and is capped at low")
+            fired = [name for name, on in signals.items() if on]
+            detail = (
+                "absent from the baseline log; %d request(s) from "
+                "%d IP(s), %d answered 2xx/3xx, %d POST/PUT, %d "
+                "without a referrer. Signals fired (%d of 5): %s."
+                % (agg["count"], len(agg["ips"]), agg["success"],
+                   agg["posts"], agg["no_referrer"], stacked,
+                   ", ".join(fired) if fired else "none"))
+            if notes:
+                detail += " Note: " + "; ".join(notes) + "."
+            out.append({
+                "class": "first-seen-executable",
+                "delta": "NEW",
+                "severity": severity, "confidence": confidence,
+                "ip": agg["ips"].most_common(1)[0][0],
+                "ips": sorted(agg["ips"]),
+                "path": path, "count": agg["count"],
+                "first_seen": agg["first_seen"],
+                "last_seen": agg["last_seen"],
+                "evidence": list(agg["evidence"]),
+                "detail": detail,
+                "signals": signals,
+            })
+        return out
+
     # -- main loop ---------------------------------------------------
     def run(self, stream):
         for raw in stream:
@@ -366,6 +522,7 @@ class Analyzer:
                     entry["ts"] > self.stats["last_entry"]:
                 self.stats["last_entry"] = entry["ts"]
             self._detect(entry)
+            self._track_first_seen(entry)
         return self
 
     def report(self, source_name, version):
@@ -373,6 +530,7 @@ class Analyzer:
         for brute_finding in self._brute.findings():
             brute_finding.setdefault("evidence", [])
             findings.append(brute_finding)
+        findings.extend(self._first_seen_findings())
         for finding in findings:
             info = ind.CLASS_INFO[finding["class"]]
             finding["title"] = info["title"]
@@ -439,6 +597,10 @@ class Analyzer:
             "tool": "weblogchecker",
             "version": version,
             "log": source_name,
+            "baseline": (
+                {"log": self.baseline_name,
+                 "executable_paths": len(self.baseline_paths)}
+                if self.baseline_paths is not None else None),
             "since": self.since.isoformat() if self.since else None,
             "stats": stats,
             "summary": {

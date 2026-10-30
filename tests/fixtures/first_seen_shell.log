@@ -1,0 +1,7 @@
+198.51.100.66 - - [28/Oct/2026:03:13:40 +0000] "GET /wp-content/uploads/2026/10/x7q2.php HTTP/1.1" 200 51234 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+198.51.100.66 - - [28/Oct/2026:03:14:02 +0000] "POST /wp-content/uploads/2026/10/x7q2.php HTTP/1.1" 200 2048 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+198.51.100.66 - - [28/Oct/2026:03:14:37 +0000] "POST /wp-content/uploads/2026/10/x7q2.php?c=ls HTTP/1.1" 200 640 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+203.0.113.10 - - [28/Oct/2026:06:12:04 +0000] "GET / HTTP/1.1" 200 15234 "-" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+203.0.113.10 - - [28/Oct/2026:07:01:12 +0000] "GET /wp-login.php HTTP/1.1" 200 3210 "-" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+192.0.2.1 - - [28/Oct/2026:07:15:00 +0000] "POST /wp-cron.php?doing_wp_cron=1793084100.99887766554433221100998877 HTTP/1.1" 200 0 "-" "WordPress/6.8; https://shop.example.com"
+203.0.113.10 - - [28/Oct/2026:07:22:03 +0000] "POST /wp-admin/admin-ajax.php HTTP/1.1" 200 148 "https://shop.example.com/wp-admin/" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"

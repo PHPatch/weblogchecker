@@ -17,6 +17,12 @@ def render_text(report):
     lines.append("weblogchecker %s - access-log compromise analysis"
                  % report["version"])
     lines.append("Log: %s" % report["log"])
+    baseline = report.get("baseline")
+    if baseline:
+        lines.append(
+            "Baseline: %s (%d executable paths known; executables "
+            "absent from it are reported as NEW)"
+            % (baseline["log"], baseline["executable_paths"]))
     if report.get("since"):
         lines.append("Since: %s (entries before this date were skipped)"
                      % report["since"])
@@ -59,14 +65,21 @@ def render_text(report):
     for idx, finding in enumerate(report["findings"], 1):
         path = finding["path"] or "(many paths)"
         lines.append("")
-        lines.append("%d. [%s severity / %s confidence] %s"
+        delta = " [%s]" % finding["delta"] if finding.get("delta") else ""
+        lines.append("%d. [%s severity / %s confidence]%s %s"
                      % (idx, finding["severity"], finding["confidence"],
-                        finding["title"]))
+                        delta, finding["title"]))
         lines.append("   %s %s - %d request(s), %s .. %s"
                      % (finding["ip"], path, finding["count"],
                         finding["first_seen"], finding["last_seen"]))
         if finding.get("detail"):
             lines.append(_wrap("Detail: " + finding["detail"]))
+        signals = finding.get("signals")
+        if signals:
+            fired = [name for name, on in signals.items() if on]
+            lines.append(_wrap(
+                "Signals fired: %s"
+                % (", ".join(fired) if fired else "none")))
         for evidence in finding["evidence"]:
             lines.append("   | " + evidence)
         lines.append(_wrap("Remediation: " + finding["remediation"]))

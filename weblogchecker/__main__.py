@@ -2,6 +2,7 @@
 
 Usage:
     weblogchecker analyze <access.log> [--since YYYY-MM-DD]
+                          [--baseline <older.log>]
                           [--format text|json]
 
 Exit codes: 0 = no indicators found, 1 = indicators found,
@@ -14,7 +15,7 @@ import sys
 from datetime import datetime
 
 from . import __version__
-from .analyze import Analyzer, open_log
+from .analyze import Analyzer, collect_baseline, open_log
 from .render import render_text
 
 
@@ -44,6 +45,12 @@ def build_parser():
     analyze.add_argument("--since", type=_parse_since, default=None,
                          metavar="YYYY-MM-DD",
                          help="only analyze entries on/after this date")
+    analyze.add_argument("--baseline", default=None,
+                         metavar="LOGFILE",
+                         help="trusted older access log: report "
+                              "executable paths that appear for the "
+                              "first time versus it, scored on "
+                              "stacked weak signals")
     analyze.add_argument("--format", choices=("text", "json"),
                          default="text")
     return parser
@@ -55,13 +62,34 @@ def main(argv=None):
     if args.command != "analyze":
         parser.print_help(sys.stderr)
         return 2
+    baseline_paths = None
+    if args.baseline is not None:
+        if args.baseline == "-" and args.logfile == "-":
+            print("weblogchecker: --baseline and the analyzed log "
+                  "cannot both be stdin", file=sys.stderr)
+            return 2
+        try:
+            baseline_stream = open_log(args.baseline)
+        except OSError as exc:
+            print("weblogchecker: cannot open baseline %s: %s"
+                  % (args.baseline, exc), file=sys.stderr)
+            return 2
+        try:
+            with baseline_stream:
+                baseline_paths, _ = collect_baseline(baseline_stream)
+        except OSError as exc:
+            print("weblogchecker: error reading baseline %s: %s"
+                  % (args.baseline, exc), file=sys.stderr)
+            return 2
     try:
         stream = open_log(args.logfile)
     except OSError as exc:
         print("weblogchecker: cannot open %s: %s"
               % (args.logfile, exc), file=sys.stderr)
         return 2
-    analyzer = Analyzer(since=args.since)
+    analyzer = Analyzer(since=args.since,
+                        baseline_paths=baseline_paths,
+                        baseline_name=args.baseline)
     try:
         with stream:
             analyzer.run(stream)

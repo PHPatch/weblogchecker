@@ -180,6 +180,24 @@ CLASS_INFO = {
             "your workflow allows it."
         ),
     },
+    "first-seen-executable": {
+        "title": "Executable file appears for the first time (absent from the baseline log)",
+        "remediation": (
+            "A script file is being requested now that never "
+            "appeared in your baseline log, and the request pattern "
+            "carries the listed signals. A legitimately new plugin, "
+            "theme file or admin tool explains most of these - "
+            "check first whether you or your team deployed it. If "
+            "not: confirm the file exists in the webroot, note its "
+            "modification time, compare it against a clean copy "
+            "(or scan the webroot with phpscan hunt), and if POSTs "
+            "to it were answered 2xx, treat the credentials the "
+            "site knows as exposed until you have proven the file "
+            "benign, and review every request from the listed IPs. "
+            "The finding is a first-appearance observation scored "
+            "on weak signals, not proof of compromise."
+        ),
+    },
     "brute-force-success": {
         "title": "Possible successful login inside a brute-force burst",
         "remediation": (

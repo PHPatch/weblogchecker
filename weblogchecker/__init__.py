@@ -8,4 +8,4 @@ weblogchecker never opens a network connection and never modifies
 the logs it analyzes.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

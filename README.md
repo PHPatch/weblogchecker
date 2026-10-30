@@ -21,6 +21,24 @@ Exit codes: `0` = no indicators, `1` = indicators found, `2` = usage error.
 Add `--format json` for machine-readable output, `--since 2026-10-01` to
 limit the window. `.gz` logs are read directly; `-` reads stdin.
 
+**New in 0.2.0 — baseline diff.** Signature lists only know shells that
+already have names. The shell that lands on *your* site has a random one.
+Give weblogchecker a trusted older log from the same site and it reports
+the executables that were never there before:
+
+```bash
+weblogchecker analyze access.log --baseline access.log.last-month
+```
+
+Every executable path (.php, .phtml, .cgi, .asp, .jsp…) that appears for
+the first time is scored on five weak signals from the log alone —
+answered 2xx/3xx, POST/PUT used, referrer-less, hit by at most 2 IPs,
+sitting under an upload/cache/temp directory — and reported as `NEW`
+with the signals, counts and log lines as evidence. First-seen alone is
+a low-severity note; severity climbs only as signals stack (details
+below), so a plugin you installed last week does not read as an
+incident.
+
 ## Install
 
 One line, from PyPI (Python 3.11+, standard library only — zero dependencies):
@@ -62,6 +80,7 @@ Verify signatures with the key in `pgp-key.asc` — fingerprint
 | Brute-force burst on wp-login.php / xmlrpc.php (≥20 POSTs / 10 min) | medium / medium | One IP, inhuman pace |
 | A 302 inside that burst after repeated failures | high / medium | The shape of a correct password — possible takeover |
 | Scanner user-agents (sqlmap, nuclei, nikto…) | low / low | Informational; scanning is not compromise |
+| Executable path absent from your `--baseline` log, answering requests | low → high / ≤ medium | The unknown-named shell no blocklist knows; severity stacks with POSTs, missing referrers, few IPs, upload dirs |
 
 Every finding class carries remediation text: quarantine the file, rotate
 credentials, review everything that IP touched. Webshell findings point at
@@ -83,8 +102,19 @@ This tool was built under the same doctrine as phpscan:
 - **False-positive discipline is tested, not promised.** The test suite
   ships a fixture of a normal busy WordPress day — admin logins, plugin
   updates, wp-cron, image uploads through wp-admin, Jetpack xmlrpc pings —
-  and asserts it produces **zero findings**. If a detector ever fires on
-  ordinary admin work, that's a bug; please report it.
+  and asserts it produces **zero findings**. A second fixture pair covers
+  the baseline mode: a normal WordPress baseline plus a later log whose
+  only novelties are a plugin installed through wp-admin, a contact form
+  posting to a new handler, and a new post must produce **zero
+  medium/high findings**. If a detector ever fires on ordinary admin
+  work, that's a bug; please report it.
+- **First-seen is a note, not an accusation.** In baseline mode a new
+  executable starts at low severity, climbs only when independent weak
+  signals stack (never on first appearance alone), is capped when its
+  first hit arrived from a wp-admin page — the shape of you installing
+  something — and its confidence never exceeds medium. The finding says
+  "this file was not in your baseline and behaves like this", with the
+  counts to judge for yourself.
 - **Read-only and offline.** weblogchecker opens no network connections and
   never modifies the log it analyzes. Your logs — which reveal your
   visitors' IPs — never leave your machine.
@@ -101,7 +131,7 @@ same memory, proportionally more time.
 
 ```
 $ weblogchecker analyze access.log
-weblogchecker 0.1.0 - access-log compromise analysis
+weblogchecker 0.2.0 - access-log compromise analysis
 Log: access.log
 Lines read: 13 | parsed: 13 | unparseable (skipped): 0
 
