@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+Second-pass expert-review fix (N4) and family consistency.
+
+- N4: the findings cap is now severity-aware. Finding keys
+  are admitted against per-severity partitions of the
+  100,000-key cap (info 5%, low 45%, medium 30%, high 20%)
+  instead of one first-come pool, so a flood of low-signal
+  findings (e.g. a botnet's shell probes, one key per source
+  IP) can no longer consume the capacity for medium/high
+  findings - a real shell finding late in a hostile log is
+  still reported. Severity upgrades of admitted keys are
+  never blocked. When any tracked state is truncated, the
+  verdict headline itself now reads "INCOMPLETE RESULTS"
+  (previously only `findings_truncated` and a NOTE said so),
+  and the truncation note lists findings dropped by
+  severity.
+- Family consistency: JSON reports now carry
+  `schema_version: 1`. (`--version` already existed.)
+- Regression tests for N4 (reviewer's flood shape, medium
+  flood, upgrade accounting, incomplete verdict with zero
+  findings) and the report contract; 66/66 tests pass under
+  both unittest and pytest, false-positive gate included.
+
 ## 0.2.1 - 2026-10-30
 
 Expert-review fix release (L1-L4); no new analysis surface.
