@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.1 - 2026-10-30
+
+Expert-review fix release (L1-L4); no new analysis surface.
+
+- L1: the brute-force tracker kept O(1) running counters
+  instead of rescanning history per entry - a 100k-entry log
+  now processes in ~0.1s where the quadratic scan needed
+  80s for 40k entries.
+- L2: baseline first-seen precision - a path counts as
+  first-seen only when the log shows it was actually
+  answered (at least one 2xx/3xx); never-answered paths
+  (e.g. thousands of 404 probes) roll into a single count
+  instead of individual phantom findings.
+- L3: tracked state is capped at 100k keys, and reports
+  disclose truncation (`findings_truncated`) when the cap
+  is hit rather than silently dropping evidence.
+- L4: the proxy blind spot is now stated as a report NOTE -
+  when a log carries only proxy IPs, per-client analysis is
+  limited and the report says so. (`--real-ip-field`
+  support deferred.)
+- Regression tests for L1-L4; `tests/__init__.py` added so
+  `python -m unittest discover` works from the repo root.
+  60/60 tests pass under both unittest and pytest.
+
 ## 0.2.0 - 2026-10-30
 
 - New: **baseline-diff orphan-executable detection** -
