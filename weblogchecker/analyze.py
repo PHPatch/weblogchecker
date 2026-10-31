@@ -50,6 +50,13 @@ BRUTE_MIN_POSTS = 20
 BRUTE_MIN_FAILURES = 10
 BRUTE_SUCCESS_MIN_PRIOR_FAILURES = 5
 
+# Cap on tracked state keys (finding keys, per-IP state,
+# first-seen paths, per-IP target paths). A hostile or simply
+# huge log must not grow memory without bound; state past the
+# cap is dropped, counted, and disclosed in the report as
+# findings_truncated instead of silently vanishing.
+MAX_TRACKED_KEYS = 100_000
+
 # Baseline-diff (first-seen executable) scoring. "Few source IPs"
 # is one of the stacked weak signals; the severity table built on
 # the signal count lives in Analyzer._first_seen_findings.
@@ -169,17 +176,34 @@ def collect_baseline(stream):
 
 
 class _BruteTracker:
-    """Streaming sliding-window tracker for login POST bursts."""
+    """Streaming sliding-window tracker for login POST bursts.
+
+    The window's failure/redirect counts are running counters
+    maintained on append/popleft, so feeding an entry is O(1).
+    (An earlier version re-summed the whole window per entry -
+    quadratic in the size of a burst, i.e. slowest exactly on
+    the botnet-scale login floods this tracker exists for.)
+    """
 
     def __init__(self):
         self._per_ip = {}
+        # Feeds dropped because a tracked-state cap was reached:
+        # new IPs past MAX_TRACKED_KEYS, and target paths past
+        # the cap on an already-tracked IP.
+        self.overflow_ips = 0
+        self.overflow_target_paths = 0
 
     def feed(self, entry):
         ip = entry["ip"]
         state = self._per_ip.get(ip)
         if state is None:
+            if len(self._per_ip) >= MAX_TRACKED_KEYS:
+                self.overflow_ips += 1
+                return
             state = {
                 "window": deque(),
+                "window_failures": 0,
+                "window_302": 0,
                 "total": 0,
                 "target_paths": set(),
                 "max_window_posts": 0,
@@ -191,21 +215,35 @@ class _BruteTracker:
             }
             self._per_ip[ip] = state
         ts = entry["ts"]
+        status = entry["status"]
         window = state["window"]
-        window.append((ts, entry["status"]))
+        window.append((ts, status))
+        if status == 302:
+            state["window_302"] += 1
+        else:
+            state["window_failures"] += 1
         while window and ts - window[0][0] > BRUTE_WINDOW:
-            window.popleft()
-        failures_before = sum(1 for _, s in window if s != 302)
-        if (entry["status"] == 302
-                and failures_before - 0 >= BRUTE_SUCCESS_MIN_PRIOR_FAILURES
+            _, evicted_status = window.popleft()
+            if evicted_status == 302:
+                state["window_302"] -= 1
+            else:
+                state["window_failures"] -= 1
+        if (status == 302
+                and state["window_failures"]
+                >= BRUTE_SUCCESS_MIN_PRIOR_FAILURES
                 and state["possible_success"] is None):
-            # The 302 itself is in the window; failures_before counts
-            # non-302 entries, which are all prior to this one.
+            # window_failures counts the non-302 entries still in
+            # the window; this entry is a 302, so they are all
+            # prior to it.
             state["possible_success"] = entry
         posts = len(window)
-        failures = sum(1 for _, s in window if s != 302)
+        failures = state["window_failures"]
         state["total"] += 1
-        state["target_paths"].add(entry["path"])
+        if entry["path"] not in state["target_paths"]:
+            if len(state["target_paths"]) >= MAX_TRACKED_KEYS:
+                self.overflow_target_paths += 1
+            else:
+                state["target_paths"].add(entry["path"])
         if posts > state["max_window_posts"]:
             state["max_window_posts"] = posts
             state["max_window_failures"] = failures
@@ -264,6 +302,22 @@ class Analyzer:
         self.baseline_paths = baseline_paths
         self.baseline_name = baseline_name
         self._first_seen = {}
+        # Tracked-state cap accounting: keys dropped because a
+        # cap (MAX_TRACKED_KEYS) was reached. Any nonzero count
+        # flips findings_truncated on in the report.
+        self._overflow = {
+            "findings": 0,
+            "first_seen_paths": 0,
+            "first_seen_ips": 0,
+        }
+        # Distinct source IPs among analyzed entries - the input
+        # to the behind-a-proxy blind-spot disclosure. Capped at
+        # MAX_TRACKED_KEYS entries; past that the count is far
+        # above the 1-2 IP proxy signature anyway.
+        self._source_ips = set()
+        # First-seen paths that never answered 2xx/3xx, rolled
+        # into one count by _first_seen_findings (see there).
+        self._never_answered = {"paths": 0, "requests": 0}
         self.stats = {
             "lines_read": 0,
             "entries_parsed": 0,
@@ -281,6 +335,9 @@ class Analyzer:
         key = (class_id, entry["ip"], path_key)
         finding = self._findings.get(key)
         if finding is None:
+            if len(self._findings) >= MAX_TRACKED_KEYS:
+                self._overflow["findings"] += 1
+                return
             finding = {
                 "class": class_id, "severity": severity,
                 "confidence": confidence, "ip": entry["ip"],
@@ -413,6 +470,9 @@ class Analyzer:
             return
         agg = self._first_seen.get(key)
         if agg is None:
+            if len(self._first_seen) >= MAX_TRACKED_KEYS:
+                self._overflow["first_seen_paths"] += 1
+                return
             agg = {
                 "count": 0, "first_seen": entry["ts"],
                 "last_seen": entry["ts"], "success": 0, "posts": 0,
@@ -433,7 +493,11 @@ class Analyzer:
             agg["posts"] += 1
         if entry["referer"] in ("", "-"):
             agg["no_referrer"] += 1
-        agg["ips"][entry["ip"]] += 1
+        if entry["ip"] not in agg["ips"] \
+                and len(agg["ips"]) >= MAX_TRACKED_KEYS:
+            self._overflow["first_seen_ips"] += 1
+        else:
+            agg["ips"][entry["ip"]] += 1
         if len(agg["evidence"]) < MAX_EVIDENCE_PER_FINDING:
             agg["evidence"].append(_truncate(entry["line"]))
 
@@ -449,10 +513,22 @@ class Analyzer:
         thin, because ordinary admin work must not read as an
         incident. Confidence never exceeds medium: the signals
         are circumstantial by construction.
+
+        A path that never answered 2xx/3xx is not reported at
+        all: a file that only ever drew 404s cannot be a planted
+        shell - it evidently is not there. Scanner sweeps probe
+        thousands of such paths, so they are rolled into a
+        single count (report -> baseline ->
+        probed_paths_never_existed) instead of one finding each.
         """
         out = []
+        self._never_answered = {"paths": 0, "requests": 0}
         for path in sorted(self._first_seen):
             agg = self._first_seen[path]
+            if agg["success"] == 0:
+                self._never_answered["paths"] += 1
+                self._never_answered["requests"] += agg["count"]
+                continue
             signals = {
                 "success_response": agg["success"] > 0,
                 "post_method": agg["posts"] > 0,
@@ -521,6 +597,8 @@ class Analyzer:
             if self.stats["last_entry"] is None or \
                     entry["ts"] > self.stats["last_entry"]:
                 self.stats["last_entry"] = entry["ts"]
+            if len(self._source_ips) < MAX_TRACKED_KEYS:
+                self._source_ips.add(entry["ip"])
             self._detect(entry)
             self._track_first_seen(entry)
         return self
@@ -578,6 +656,53 @@ class Analyzer:
         stats = dict(self.stats)
         for key in ("first_entry", "last_entry"):
             stats[key] = stats[key].isoformat() if stats[key] else None
+        tracking_overflow = {
+            "findings": self._overflow["findings"],
+            "brute_force_ips": self._brute.overflow_ips,
+            "brute_force_target_paths":
+                self._brute.overflow_target_paths,
+            "first_seen_paths": self._overflow["first_seen_paths"],
+            "first_seen_ips": self._overflow["first_seen_ips"],
+        }
+        stats["tracking_overflow"] = tracking_overflow
+        findings_truncated = any(tracking_overflow.values())
+
+        baseline_info = None
+        if self.baseline_paths is not None:
+            baseline_info = {
+                "log": self.baseline_name,
+                "executable_paths": len(self.baseline_paths),
+                "probed_paths_never_existed":
+                    self._never_answered["paths"],
+                "probed_requests_never_answered":
+                    self._never_answered["requests"],
+            }
+
+        notes = []
+        if 1 <= len(self._source_ips) <= FEW_IPS_MAX:
+            notes.append(
+                "Blind spot: every analyzed request carries one "
+                "of only %d source IP(s) (%s) - the signature of "
+                "a CDN or reverse proxy in front of the origin. "
+                "In that setup the logged IP is the proxy's, not "
+                "the client's, so IP-based signals are unreliable "
+                "and must be treated as disabled: per-IP "
+                "brute-force detection cannot separate one "
+                "attacker from all visitors sharing the proxy, "
+                "and the first-seen 'few source IPs' signal "
+                "fires for everything. For IP attribution, "
+                "analyze the proxy/CDN log or a log format that "
+                "records the real client IP."
+                % (len(self._source_ips),
+                   ", ".join(sorted(self._source_ips))))
+        if findings_truncated:
+            notes.append(
+                "Findings truncated: tracked state hit the "
+                "%d-key cap while reading this log, so some "
+                "findings/state were dropped (see "
+                "stats.tracking_overflow for counts). What is "
+                "reported below is a lower bound, not the full "
+                "picture." % MAX_TRACKED_KEYS)
 
         if findings:
             verdict = (
@@ -597,12 +722,11 @@ class Analyzer:
             "tool": "weblogchecker",
             "version": version,
             "log": source_name,
-            "baseline": (
-                {"log": self.baseline_name,
-                 "executable_paths": len(self.baseline_paths)}
-                if self.baseline_paths is not None else None),
+            "baseline": baseline_info,
             "since": self.since.isoformat() if self.since else None,
             "stats": stats,
+            "findings_truncated": findings_truncated,
+            "notes": notes,
             "summary": {
                 "total_findings": len(findings),
                 "by_severity": by_severity,

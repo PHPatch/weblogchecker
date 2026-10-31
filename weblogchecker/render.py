@@ -23,6 +23,12 @@ def render_text(report):
             "Baseline: %s (%d executable paths known; executables "
             "absent from it are reported as NEW)"
             % (baseline["log"], baseline["executable_paths"]))
+        never = baseline.get("probed_paths_never_existed") or 0
+        if never:
+            lines.append(
+                "Baseline diff: %d probed paths never existed "
+                "(never answered 2xx/3xx) - rolled into this one "
+                "count, not reported as findings" % never)
     if report.get("since"):
         lines.append("Since: %s (entries before this date were skipped)"
                      % report["since"])
@@ -39,6 +45,9 @@ def render_text(report):
     lines.append("")
     lines.append(_wrap(report["verdict"], indent=""))
     lines.append("")
+    for note in report.get("notes", []):
+        lines.append(_wrap("NOTE: " + note, indent=""))
+        lines.append("")
 
     if not report["findings"]:
         lines.append("Findings: none.")
