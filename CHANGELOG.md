@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.2 — 2026-10-31
+
 Second-pass expert-review fix (N4) and family consistency.
 
 - N4: the findings cap is now severity-aware. Finding keys
