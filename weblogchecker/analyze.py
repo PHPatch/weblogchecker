@@ -57,6 +57,41 @@ BRUTE_SUCCESS_MIN_PRIOR_FAILURES = 5
 # findings_truncated instead of silently vanishing.
 MAX_TRACKED_KEYS = 100_000
 
+# N4 (second-pass expert review): admission to the findings
+# table is severity-aware. A single first-come cap lets a flood
+# of low-signal findings (e.g. a botnet's shell probes, one key
+# per source IP) consume every slot, so a real shell finding
+# later in the log is refused - the exact evidence the tool
+# exists to surface. Instead, the findings share of
+# MAX_TRACKED_KEYS is partitioned by severity: each severity
+# class may hold at most its share of keys, so one class's
+# flood can never consume another class's capacity. At the
+# default 100,000-key cap the partitions are: info 5,000 keys
+# (5%), low 45,000 (45%), medium 30,000 (30%), high 20,000
+# (20%). A late high-severity finding therefore always has
+# its own 20,000-key partition available no matter how much
+# low/medium noise preceded it. Severity upgrades of an
+# already-admitted key are never blocked (they allocate no
+# new state); the key's accounting simply moves to the higher
+# class's partition.
+SEVERITY_KEY_SHARES = {
+    "info": 0.05,
+    "low": 0.45,
+    "medium": 0.30,
+    "high": 0.20,
+}
+
+
+def _severity_key_limit(severity):
+    """Finding-key budget for one severity class (N4).
+
+    Reads MAX_TRACKED_KEYS at call time so the partitions
+    scale with the cap (and so tests can lower the cap and
+    exercise the partitions at small numbers).
+    """
+    return max(1, int(MAX_TRACKED_KEYS
+                      * SEVERITY_KEY_SHARES[severity]))
+
 # Baseline-diff (first-seen executable) scoring. "Few source IPs"
 # is one of the stacked weak signals; the severity table built on
 # the signal count lives in Analyzer._first_seen_findings.
@@ -310,6 +345,15 @@ class Analyzer:
             "first_seen_paths": 0,
             "first_seen_ips": 0,
         }
+        # N4: findings keys held per severity class (the key's
+        # CURRENT severity - an upgrade moves the count), and
+        # finding keys refused per severity class. Admission is
+        # per-class against SEVERITY_KEY_SHARES partitions of
+        # MAX_TRACKED_KEYS, never first-come across classes.
+        self._findings_by_severity = {name: 0 for name in
+                                      SEVERITY_RANK}
+        self._overflow_by_severity = {name: 0 for name in
+                                      SEVERITY_RANK}
         # Distinct source IPs among analyzed entries - the input
         # to the behind-a-proxy blind-spot disclosure. Capped at
         # MAX_TRACKED_KEYS entries; past that the count is far
@@ -335,8 +379,13 @@ class Analyzer:
         key = (class_id, entry["ip"], path_key)
         finding = self._findings.get(key)
         if finding is None:
-            if len(self._findings) >= MAX_TRACKED_KEYS:
+            # N4: admission is checked against the incoming
+            # severity's own partition of the cap, so a flood
+            # in one severity class cannot starve the others.
+            if self._findings_by_severity[severity] \
+                    >= _severity_key_limit(severity):
                 self._overflow["findings"] += 1
+                self._overflow_by_severity[severity] += 1
                 return
             finding = {
                 "class": class_id, "severity": severity,
@@ -346,12 +395,17 @@ class Analyzer:
                 "evidence": [], "detail": detail,
             }
             self._findings[key] = finding
+            self._findings_by_severity[severity] += 1
         finding["count"] += 1
         if entry["ts"] < finding["first_seen"]:
             finding["first_seen"] = entry["ts"]
         if entry["ts"] > finding["last_seen"]:
             finding["last_seen"] = entry["ts"]
         if SEVERITY_RANK[severity] > SEVERITY_RANK[finding["severity"]]:
+            # The key moves to the higher severity's partition;
+            # upgrades are never refused (no new state).
+            self._findings_by_severity[finding["severity"]] -= 1
+            self._findings_by_severity[severity] += 1
             finding["severity"] = severity
             if detail:
                 finding["detail"] = detail
@@ -696,13 +750,21 @@ class Analyzer:
                 % (len(self._source_ips),
                    ", ".join(sorted(self._source_ips))))
         if findings_truncated:
+            dropped = ", ".join(
+                "%s %d" % (name,
+                           self._overflow_by_severity[name])
+                for name in ("high", "medium", "low", "info")
+                if self._overflow_by_severity[name])
             notes.append(
                 "Findings truncated: tracked state hit the "
                 "%d-key cap while reading this log, so some "
                 "findings/state were dropped (see "
-                "stats.tracking_overflow for counts). What is "
+                "stats.tracking_overflow for counts%s). What is "
                 "reported below is a lower bound, not the full "
-                "picture." % MAX_TRACKED_KEYS)
+                "picture."
+                % (MAX_TRACKED_KEYS,
+                   "; findings dropped by severity: " + dropped
+                   if dropped else ""))
 
         if findings:
             verdict = (
@@ -717,9 +779,20 @@ class Analyzer:
                 "does not prove the site is clean - only that none "
                 "of the patterns weblogchecker checks appear in this log."
             )
+        if findings_truncated:
+            # N4: the headline itself must carry the
+            # incompleteness - a stats field and a NOTE are too
+            # easy to miss when the verdict is quoted on its own.
+            verdict = (
+                "INCOMPLETE RESULTS - " + verdict + " Tracked "
+                "state hit its key caps while reading this log, "
+                "so some findings were dropped: what is reported "
+                "here is a lower bound, not the full picture."
+            )
 
         return {
             "tool": "weblogchecker",
+            "schema_version": 1,
             "version": version,
             "log": source_name,
             "baseline": baseline_info,
